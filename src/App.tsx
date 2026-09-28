@@ -1,158 +1,241 @@
+import { useEffect, useMemo, useState } from "react";
 import "./styles.css";
-
-const project = {
-  "id": "hxwl-12",
-  "port": 5112,
-  "title": "心理咨询个案记录",
-  "subtitle": "会谈时间线、风险等级与干预目标记录",
-  "stack": "React + Vite + TypeScript + CSS",
-  "theme": [
-    "#7c3aed",
-    "#0f766e",
-    "#f59e0b"
-  ],
-  "domain": "心理咨询",
-  "users": [
-    "咨询师",
-    "督导",
-    "机构管理员"
-  ],
-  "metrics": [
-    "活跃个案",
-    "高风险关注",
-    "本周会谈",
-    "目标推进"
-  ],
-  "filters": [
-    "焦虑",
-    "亲密关系",
-    "亲子",
-    "职业压力"
-  ],
-  "fields": [
-    "来访者代号",
-    "咨询主题",
-    "会谈日期",
-    "主要困扰",
-    "情绪状态",
-    "干预方法",
-    "下次目标"
-  ],
-  "records": [
-    [
-      "C-042",
-      "焦虑",
-      "中风险",
-      "睡眠改善，练习呼吸放松"
-    ],
-    [
-      "C-119",
-      "亲密关系",
-      "稳定",
-      "识别沟通中的回避模式"
-    ],
-    [
-      "C-203",
-      "职业压力",
-      "关注",
-      "设定下周边界练习"
-    ]
-  ]
-};
-
-const statusColors = ["status-ok", "status-watch", "status-danger"];
-
-function MetricCard({ label, value, index }: { label: string; value: string; index: number }) {
-  return (
-    <article className="metric-card">
-      <span>{label}</span>
-      <strong>{value}</strong>
-      <i className={statusColors[index % statusColors.length]} />
-    </article>
-  );
-}
+import type { CounselorId, SessionState } from "./types";
+import {
+  COUNSELORS,
+  addObservation,
+  deleteObservation,
+  editDraftContent,
+  editMinutes,
+  generateMinutes,
+  loadState,
+  resetState,
+  restoreMinutes,
+  saveState,
+  shareObservation,
+  toggleDraftConfirm,
+  withdrawDraft,
+  isBothConfirmed,
+} from "./store";
+import { PrivateZone } from "./components/PrivateZone";
+import { SharedDraftZone } from "./components/SharedDraftZone";
+import { MinutesZone } from "./components/MinutesZone";
+import { ExportModal } from "./components/ExportModal";
 
 function App() {
-  const values = project.metrics.map((metric: string, index: number) => {
-    const base = [84, 12, 31, 7][index % 4];
-    return String(base + index * 3);
-  });
+  const [state, setState] = useState<SessionState>(() => loadState());
+  const [viewer, setViewer] = useState<CounselorId>("A");
+  const [toast, setToast] = useState<string | null>(null);
+  const [exportOpen, setExportOpen] = useState(false);
+
+  useEffect(() => {
+    saveState(state);
+  }, [state]);
+
+  function notify(message: string) {
+    setToast(message);
+    window.setTimeout(() => setToast(null), 2600);
+  }
+
+  const pendingDrafts = state.drafts.filter((d) => !isBothConfirmed(d));
+  const confirmedDrafts = state.drafts.filter(isBothConfirmed);
+  const sensitiveTotal = state.observations.filter((o) => o.sensitive).length;
+
+  const viewerConfirms = useMemo(() => {
+    const ownObs = state.observations.filter((o) => o.authorId === viewer && !o.sensitive).length;
+    return { ownObs };
+  }, [state.observations, viewer]);
+
+  function handleDeleteObs(obsId: string) {
+    const before = state;
+    const next = deleteObservation(state, obsId);
+    if (next === before) {
+      notify("该观察对应段落已双方确认并入正式纪要，请通过正式纪要修订处理");
+      return;
+    }
+    setState(next);
+    notify("已删除；若此前已分享且未确认，对应草稿一并撤回");
+  }
 
   return (
     <main className="app-shell">
       <section className="hero">
         <div>
-          <p className="eyebrow">{project.id} · port {project.port}</p>
-          <h1>{project.title}</h1>
-          <p className="subtitle">{project.subtitle}</p>
+          <p className="eyebrow">hxwl-12 · 联合会谈记录台</p>
+          <h1>两位咨询师 · 同一场会谈</h1>
+          <p className="subtitle">
+            各自先在私密区写观察，点名分享后段落才进入共同草稿；两位逐段确认后生成正式纪要。
+            涉来访者亲属或未经同意第三人的内容始终留在私密区，导出时逐条过滤并说明原因；正式纪要的每次改动都保留旧版本、原因与时间。
+          </p>
+          <div className="case-meta">
+            <label>
+              <span>来访者代号</span>
+              <input value={state.clientCode} onChange={(e) => setState({ ...state, clientCode: e.target.value })} />
+            </label>
+            <label>
+              <span>咨询主题</span>
+              <input value={state.topic} onChange={(e) => setState({ ...state, topic: e.target.value })} />
+            </label>
+            <label>
+              <span>会谈日期</span>
+              <input
+                type="date"
+                value={state.sessionDate}
+                onChange={(e) => setState({ ...state, sessionDate: e.target.value })}
+              />
+            </label>
+          </div>
         </div>
-        <div className="stack-card">
-          <span>技术栈</span>
-          <strong>{project.stack}</strong>
+
+        <div className="stack-card identity-card">
+          <span>当前身份（模拟两位咨询师分别登录）</span>
+          <div className="identity-switch">
+            {(["A", "B"] as CounselorId[]).map((cid) => (
+              <button
+                key={cid}
+                type="button"
+                className={viewer === cid ? "identity-on" : ""}
+                onClick={() => setViewer(cid)}
+              >
+                <strong>{COUNSELORS[cid].name}</strong>
+                <em>{COUNSELORS[cid].role}</em>
+              </button>
+            ))}
+          </div>
+          <p className="identity-note">
+            切换身份即可看到：对方私密区对你关闭；你只能勾选自己的确认框。
+          </p>
+          <button
+            type="button"
+            className="reset-btn"
+            onClick={() => {
+              setState(resetState());
+              notify("已恢复为演示数据");
+            }}
+          >
+            重置演示数据
+          </button>
         </div>
       </section>
 
       <section className="metrics-grid">
-        {project.metrics.map((metric: string, index: number) => (
-          <MetricCard key={metric} label={metric} value={values[index]} index={index} />
-        ))}
+        <article className="metric-card">
+          <span>我的私密观察</span>
+          <strong>{viewerConfirms.ownObs}</strong>
+          <i className="status-ok" />
+        </article>
+        <article className="metric-card">
+          <span>草稿待确认段落</span>
+          <strong>{pendingDrafts.length}</strong>
+          <i className="status-watch" />
+        </article>
+        <article className="metric-card">
+          <span>双方已确认段落</span>
+          <strong>{confirmedDrafts.length}</strong>
+          <i className="status-ok" />
+        </article>
+        <article className="metric-card">
+          <span>私密保留 / 纪要版本</span>
+          <strong>
+            {sensitiveTotal} / v{state.currentMinutesVersion ?? "—"}
+          </strong>
+          <i className="status-danger" />
+        </article>
       </section>
 
-      <section className="workspace">
-        <aside className="panel narrow">
-          <h2>角色</h2>
-          <div className="chips">
-            {project.users.map((user: string) => (
-              <span key={user}>{user}</span>
-            ))}
-          </div>
-          <h2>筛选</h2>
-          <div className="chips muted">
-            {project.filters.map((filter: string) => (
-              <button key={filter}>{filter}</button>
-            ))}
-          </div>
-        </aside>
-
-        <section className="panel">
-          <div className="section-heading">
-            <div>
-              <p>{project.domain}</p>
-              <h2>记录字段</h2>
-            </div>
-            <button className="primary-action">新增记录</button>
-          </div>
-          <div className="field-grid">
-            {project.fields.map((field: string) => (
-              <label key={field}>
-                <span>{field}</span>
-                <input placeholder={"填写" + field} />
-              </label>
-            ))}
-          </div>
-        </section>
-      </section>
-
-      <section className="records panel">
-        <div className="section-heading">
-          <div>
-            <p>示例数据</p>
-            <h2>近期记录</h2>
-          </div>
-          <button>导出摘要</button>
-        </div>
-        <div className="record-list">
-          {project.records.map((record: string[], index: number) => (
-            <article key={record.join("-")} className="record-card">
-              <div className="record-index">{String(index + 1).padStart(2, "0")}</div>
-              <div>
-                <h3>{record[0]}</h3>
-                <p>{record.slice(1).join(" · ")}</p>
-              </div>
-            </article>
+      {pendingDrafts.length > 0 && (
+        <div className="reopen-banner">
+          📌 重新打开本页时仍有 <strong>{pendingDrafts.length}</strong> 段待确认内容保留在共同草稿中：
+          {pendingDrafts.map((d) => (
+            <span key={d.id} className="banner-chip">
+              {COUNSELORS[d.sharedById].name}分享 · {d.content.slice(0, 18)}…（甲{d.confirmedA ? "✓" : "✗"}/乙
+              {d.confirmedB ? "✓" : "✗"}）
+            </span>
           ))}
         </div>
+      )}
+
+      <section className="private-grid">
+        <PrivateZone
+          counselorId="A"
+          viewer={viewer}
+          observations={state.observations}
+          onAdd={(content, sensitive) => {
+            setState((s) => addObservation(s, "A", content, sensitive));
+            notify(sensitive ? "已保存至甲的私密区（敏感内容不可分享）" : "已保存至甲的私密区");
+          }}
+          onShare={(obsId) => {
+            setState((s) => shareObservation(s, obsId));
+            notify("已点名分享，甲的确认已自动勾选，等待乙确认");
+          }}
+          onDelete={handleDeleteObs}
+          notify={notify}
+        />
+        <PrivateZone
+          counselorId="B"
+          viewer={viewer}
+          observations={state.observations}
+          onAdd={(content, sensitive) => {
+            setState((s) => addObservation(s, "B", content, sensitive));
+            notify(sensitive ? "已保存至乙的私密区（敏感内容不可分享）" : "已保存至乙的私密区");
+          }}
+          onShare={(obsId) => {
+            setState((s) => shareObservation(s, obsId));
+            notify("已点名分享，乙的确认已自动勾选，等待甲确认");
+          }}
+          onDelete={handleDeleteObs}
+          notify={notify}
+        />
       </section>
+
+      <SharedDraftZone
+        viewer={viewer}
+        drafts={state.drafts}
+        observations={state.observations}
+        hasMinutes={state.currentMinutesVersion !== null}
+        onToggleConfirm={(draftId, counselor) => {
+          if (counselor !== viewer) {
+            notify("只能由本人勾选/取消自己的确认");
+            return;
+          }
+          setState((s) => toggleDraftConfirm(s, draftId, counselor));
+        }}
+        onEditContent={(draftId, content) => {
+          setState((s) => editDraftContent(s, draftId, content));
+          notify("草稿已修改，双方确认状态已重置，需要重新逐段确认");
+        }}
+        onWithdraw={(draftId) => {
+          setState((s) => withdrawDraft(s, draftId));
+          notify("已撤回到分享人的私密区");
+        }}
+        onGenerate={(reason) => {
+          setState((s) => generateMinutes(s, viewer, reason));
+          notify(state.currentMinutesVersion === null ? "正式纪要已生成" : "已保存为正式纪要新版本");
+        }}
+        notify={notify}
+      />
+
+      <MinutesZone
+        viewer={viewer}
+        versions={state.minutesVersions}
+        currentVersion={state.currentMinutesVersion}
+        onEdit={(paragraphs, reason) => {
+          setState((s) => editMinutes(s, viewer, paragraphs, reason));
+          notify("旧版本已归档，修订内容保存为新版本");
+        }}
+        onRestore={(target, reason) => {
+          setState((s) => restoreMinutes(s, viewer, target, reason));
+          notify(`已回退为基于 v${target} 的新版本`);
+        }}
+        onOpenExport={() => setExportOpen(true)}
+        notify={notify}
+      />
+
+      {exportOpen && (
+        <ExportModal state={state} viewer={viewer} onClose={() => setExportOpen(false)} notify={notify} />
+      )}
+
+      {toast && <div className="toast">{toast}</div>}
     </main>
   );
 }
